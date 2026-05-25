@@ -1,0 +1,75 @@
+# trace-field-normalize
+
+Normalize inconsistent field names in agent trace JSONL events. Zero dependencies.
+
+Different agent frameworks use different names for the same semantic fields.
+`trace-field-normalize` maps known variants to canonical names so your
+downstream tooling sees a consistent schema.
+
+## Install
+
+```bash
+pip install trace-field-normalize
+```
+
+## Usage
+
+```python
+from trace_field_normalize import normalize_event, normalize_events, normalize_file
+
+# Single event
+event = {"input_tokens": 42, "latency_ms": 350, "model_id": "claude-sonnet-4-5"}
+normalized = normalize_event(event)
+# {"tokens_in": 42, "duration_ms": 350, "model": "claude-sonnet-4-5"}
+
+# List of events
+events = normalize_events([...])
+
+# JSONL file
+events = normalize_file("traces.jsonl", "normalized.jsonl")
+```
+
+## Default field map
+
+| Canonical     | Variants accepted |
+|---------------|-------------------|
+| `kind`        | `event_type`, `type`, `event_kind` |
+| `name`        | `step`, `tool`, `tool_name`, `function_name` |
+| `tokens_in`   | `input_tokens`, `prompt_tokens`, `tokens_prompt` |
+| `tokens_out`  | `output_tokens`, `completion_tokens`, `tokens_completion` |
+| `cost_usd`    | `cost`, `price_usd`, `usd`, `price` |
+| `duration_ms` | `latency_ms`, `elapsed_ms`, `duration`, `latency` |
+| `error`       | `err`, `exception`, `error_message` |
+| `model`       | `model_id`, `model_name` |
+| `lane`        | `worker`, `agent_id`, `thread` |
+| `timestamp`   | `ts`, `time`, `created_at`, `event_time` |
+
+## Custom field maps
+
+```python
+from trace_field_normalize import FieldMap, normalize_event
+
+fm = FieldMap({"score": ["rating", "confidence"]}, include_defaults=True)
+event = {"rating": 0.95}
+normalize_event(event, fm)  # {"score": 0.95}
+```
+
+## Canonical wins
+
+If the canonical name is already present, variants are left unchanged.
+
+```python
+event = {"tokens_in": 99, "input_tokens": 42}
+normalize_event(event)  # {"tokens_in": 99, "input_tokens": 42}
+```
+
+## keep_original
+
+```python
+normalize_event({"ts": 100}, keep_original=True)
+# {"timestamp": 100, "ts": 100}
+```
+
+## Zero dependencies
+
+Standard library only: `json`, `dataclasses`, `pathlib`. Nothing else.

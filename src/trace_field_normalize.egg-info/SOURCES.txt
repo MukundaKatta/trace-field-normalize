@@ -1,0 +1,11 @@
+LICENSE
+README.md
+pyproject.toml
+src/trace_field_normalize/__init__.py
+src/trace_field_normalize/core.py
+src/trace_field_normalize/py.typed
+src/trace_field_normalize.egg-info/PKG-INFO
+src/trace_field_normalize.egg-info/SOURCES.txt
+src/trace_field_normalize.egg-info/dependency_links.txt
+src/trace_field_normalize.egg-info/top_level.txt
+tests/test_trace_field_normalize.py

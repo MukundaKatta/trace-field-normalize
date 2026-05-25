@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trace-field-normalize"
+version = "0.1.0"
+description = "Normalize inconsistent field names in agent trace JSONL events. Zero dependencies."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+keywords = ["agents", "tracing", "llm", "jsonl", "normalization"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/MukundaKatta/trace-field-normalize"
+
+[tool.setuptools.packages.find]
+where = ["src"]
