@@ -75,10 +75,13 @@ _DEFAULT = FieldMap()
 class NormalizeResult:
     """Result of normalizing a single event.
 
+    Produced by :func:`normalize_event_verbose` when you need to know which
+    keys were renamed (for logging, metrics, or debugging).
+
     Attributes:
         event: the normalized event dict.
-        renamed: dict of {old_name: canonical_name} for fields that were renamed.
-        unchanged: list of fields that were not renamed (already canonical or unknown).
+        renamed: dict of ``{old_name: canonical_name}`` for fields that were
+            renamed.
     """
 
     event: dict[str, Any]
@@ -86,7 +89,38 @@ class NormalizeResult:
 
     @property
     def rename_count(self) -> int:
+        """Number of fields that were renamed."""
         return len(self.renamed)
+
+
+def _normalize(
+    event: dict[str, Any],
+    field_map: FieldMap | None,
+    keep_original: bool,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Core normalization routine.
+
+    Returns the normalized event and a ``{old_name: canonical_name}`` map of
+    the renames that were applied.
+    """
+    fm = field_map or _DEFAULT
+    result = dict(event)
+    renamed: dict[str, str] = {}
+
+    for canonical, variants in fm.items():
+        if canonical in result:
+            # Already has the canonical name — skip
+            continue
+        for variant in variants:
+            if variant in result:
+                value = result.pop(variant)
+                result[canonical] = value
+                renamed[variant] = canonical
+                if keep_original:
+                    result[variant] = value
+                break  # only rename the first matching variant
+
+    return result, renamed
 
 
 def normalize_event(
@@ -109,24 +143,37 @@ def normalize_event(
             in addition to the canonical name.
 
     Returns:
-        New dict with normalized field names.
+        New dict with normalized field names. The input ``event`` is never
+        mutated.
     """
-    fm = field_map or _DEFAULT
-    result = dict(event)
-
-    for canonical, variants in fm.items():
-        if canonical in result:
-            # Already has the canonical name — skip
-            continue
-        for variant in variants:
-            if variant in result:
-                value = result.pop(variant)
-                result[canonical] = value
-                if keep_original:
-                    result[variant] = value
-                break  # only rename the first matching variant
-
+    result, _ = _normalize(event, field_map, keep_original)
     return result
+
+
+def normalize_event_verbose(
+    event: dict[str, Any],
+    field_map: FieldMap | None = None,
+    *,
+    keep_original: bool = False,
+) -> NormalizeResult:
+    """Normalize a single event and report which fields were renamed.
+
+    Behaves exactly like :func:`normalize_event` but returns a
+    :class:`NormalizeResult` carrying both the normalized ``event`` and a
+    ``renamed`` map of ``{old_name: canonical_name}``. Useful when you want to
+    log or count how much normalization actually happened.
+
+    Args:
+        event: the raw event dict.
+        field_map: custom FieldMap; uses defaults if None.
+        keep_original: if True, keep the original field under its old name
+            in addition to the canonical name.
+
+    Returns:
+        A :class:`NormalizeResult`. The input ``event`` is never mutated.
+    """
+    result, renamed = _normalize(event, field_map, keep_original)
+    return NormalizeResult(event=result, renamed=renamed)
 
 
 def normalize_events(
@@ -159,14 +206,28 @@ def normalize_file(
 
     Returns:
         List of normalized event dicts.
+
+    Raises:
+        FileNotFoundError: if ``source`` does not exist.
+        ValueError: if a non-blank line is not valid JSON or does not decode
+            to a JSON object (the error message includes the 1-based line
+            number).
     """
     p = Path(source)
     events: list[dict[str, Any]] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for lineno, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
-        events.append(json.loads(line))
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{p}: line {lineno}: invalid JSON: {exc}") from exc
+        if not isinstance(obj, dict):
+            raise ValueError(
+                f"{p}: line {lineno}: expected a JSON object, got {type(obj).__name__}"
+            )
+        events.append(obj)
 
     normalized = normalize_events(events, field_map, keep_original=keep_original)
 

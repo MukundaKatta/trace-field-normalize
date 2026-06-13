@@ -1,303 +1,314 @@
-"""Tests for trace-field-normalize."""
+"""Tests for trace-field-normalize.
+
+Uses only the Python standard library (``unittest``) so the suite runs with
+no third-party dependencies::
+
+    python3 -m unittest discover -s tests
+"""
 
 import json
+import os
+import sys
 import tempfile
+import unittest
 from pathlib import Path
 
-import pytest
+# Allow running the suite from a source checkout without installing the
+# package: make ``src/`` importable when the package is not already on the path.
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
-from trace_field_normalize import FieldMap, NormalizeResult, normalize_event, normalize_events, normalize_file
+import trace_field_normalize
+from trace_field_normalize import (
+    FieldMap,
+    NormalizeResult,
+    normalize_event,
+    normalize_event_verbose,
+    normalize_events,
+    normalize_file,
+)
 
 
-# ---------------------------------------------------------------------------
-# normalize_event — basic renaming
-# ---------------------------------------------------------------------------
+class TestNormalizeEventBasicRenaming(unittest.TestCase):
+    def test_renames_tokens_in(self):
+        result = normalize_event({"input_tokens": 42, "some_field": "x"})
+        self.assertEqual(result["tokens_in"], 42)
+        self.assertNotIn("input_tokens", result)
 
-def test_renames_tokens_in():
-    event = {"input_tokens": 42, "some_field": "x"}
-    result = normalize_event(event)
-    assert result["tokens_in"] == 42
-    assert "input_tokens" not in result
+    def test_renames_tokens_out(self):
+        self.assertEqual(normalize_event({"completion_tokens": 10})["tokens_out"], 10)
 
-def test_renames_tokens_out():
-    event = {"completion_tokens": 10}
-    result = normalize_event(event)
-    assert result["tokens_out"] == 10
+    def test_renames_cost_usd(self):
+        self.assertEqual(normalize_event({"cost": 0.001})["cost_usd"], 0.001)
 
-def test_renames_cost_usd():
-    event = {"cost": 0.001}
-    result = normalize_event(event)
-    assert result["cost_usd"] == 0.001
+    def test_renames_duration_ms(self):
+        self.assertEqual(normalize_event({"latency_ms": 350})["duration_ms"], 350)
 
-def test_renames_duration_ms():
-    event = {"latency_ms": 350}
-    result = normalize_event(event)
-    assert result["duration_ms"] == 350
+    def test_renames_kind(self):
+        self.assertEqual(normalize_event({"event_type": "llm_call"})["kind"], "llm_call")
 
-def test_renames_kind():
-    event = {"event_type": "llm_call"}
-    result = normalize_event(event)
-    assert result["kind"] == "llm_call"
+    def test_renames_name(self):
+        self.assertEqual(normalize_event({"tool_name": "web_search"})["name"], "web_search")
 
-def test_renames_name():
-    event = {"tool_name": "web_search"}
-    result = normalize_event(event)
-    assert result["name"] == "web_search"
+    def test_renames_error(self):
+        self.assertEqual(normalize_event({"err": "timeout"})["error"], "timeout")
 
-def test_renames_error():
-    event = {"err": "timeout"}
-    result = normalize_event(event)
-    assert result["error"] == "timeout"
+    def test_renames_model(self):
+        self.assertEqual(
+            normalize_event({"model_id": "claude-sonnet-4-5"})["model"],
+            "claude-sonnet-4-5",
+        )
 
-def test_renames_model():
-    event = {"model_id": "claude-sonnet-4-5"}
-    result = normalize_event(event)
-    assert result["model"] == "claude-sonnet-4-5"
+    def test_renames_lane(self):
+        self.assertEqual(normalize_event({"agent_id": "worker-3"})["lane"], "worker-3")
 
-def test_renames_lane():
-    event = {"agent_id": "worker-3"}
-    result = normalize_event(event)
-    assert result["lane"] == "worker-3"
+    def test_renames_timestamp(self):
+        self.assertEqual(normalize_event({"ts": 1700000000})["timestamp"], 1700000000)
 
-def test_renames_timestamp():
-    event = {"ts": 1700000000}
-    result = normalize_event(event)
-    assert result["timestamp"] == 1700000000
-
-def test_renames_multiple_fields():
-    event = {
-        "input_tokens": 100,
-        "completion_tokens": 50,
-        "latency_ms": 400,
-        "model_id": "claude-sonnet-4-5",
-    }
-    result = normalize_event(event)
-    assert result["tokens_in"] == 100
-    assert result["tokens_out"] == 50
-    assert result["duration_ms"] == 400
-    assert result["model"] == "claude-sonnet-4-5"
-
-# ---------------------------------------------------------------------------
-# canonical already present — no rename
-# ---------------------------------------------------------------------------
-
-def test_canonical_wins():
-    event = {"tokens_in": 99, "input_tokens": 42}
-    result = normalize_event(event)
-    assert result["tokens_in"] == 99
-    assert "input_tokens" in result  # not consumed
-
-def test_canonical_already_present_skips_all_variants():
-    event = {"kind": "existing", "event_type": "other", "type": "third"}
-    result = normalize_event(event)
-    assert result["kind"] == "existing"
-
-# ---------------------------------------------------------------------------
-# unknown / non-canonical fields preserved
-# ---------------------------------------------------------------------------
-
-def test_unknown_fields_preserved():
-    event = {"foo": "bar", "baz": 123}
-    result = normalize_event(event)
-    assert result["foo"] == "bar"
-    assert result["baz"] == 123
-
-def test_no_variants_present():
-    event = {"some_unrelated": "value"}
-    result = normalize_event(event)
-    assert result == {"some_unrelated": "value"}
-
-def test_empty_event():
-    assert normalize_event({}) == {}
-
-# ---------------------------------------------------------------------------
-# keep_original flag
-# ---------------------------------------------------------------------------
-
-def test_keep_original_preserves_old_key():
-    event = {"input_tokens": 42}
-    result = normalize_event(event, keep_original=True)
-    assert result["tokens_in"] == 42
-    assert result["input_tokens"] == 42
-
-def test_keep_original_false_removes_old_key():
-    event = {"input_tokens": 42}
-    result = normalize_event(event, keep_original=False)
-    assert "input_tokens" not in result
-
-def test_keep_original_with_multiple_fields():
-    event = {"ts": 1, "model_id": "x"}
-    result = normalize_event(event, keep_original=True)
-    assert result["timestamp"] == 1
-    assert result["ts"] == 1
-    assert result["model"] == "x"
-    assert result["model_id"] == "x"
-
-# ---------------------------------------------------------------------------
-# only first matching variant is renamed
-# ---------------------------------------------------------------------------
-
-def test_only_first_variant_renamed():
-    # Both prompt_tokens and input_tokens are variants of tokens_in
-    event = {"prompt_tokens": 5, "input_tokens": 10}
-    result = normalize_event(event)
-    assert "tokens_in" in result
-    # One variant is renamed; other might still be present since canonical is now set
-    # Either way, canonical has a value
-    assert result["tokens_in"] in (5, 10)
-
-# ---------------------------------------------------------------------------
-# does not modify original event
-# ---------------------------------------------------------------------------
-
-def test_does_not_mutate_original():
-    event = {"input_tokens": 42, "foo": "bar"}
-    original = dict(event)
-    normalize_event(event)
-    assert event == original
-
-# ---------------------------------------------------------------------------
-# normalize_events
-# ---------------------------------------------------------------------------
-
-def test_normalize_events_empty():
-    assert normalize_events([]) == []
-
-def test_normalize_events_single():
-    events = [{"input_tokens": 5}]
-    result = normalize_events(events)
-    assert result == [{"tokens_in": 5}]
-
-def test_normalize_events_multiple():
-    events = [
-        {"input_tokens": 10},
-        {"completion_tokens": 20},
-        {"latency_ms": 300},
-    ]
-    result = normalize_events(events)
-    assert result[0]["tokens_in"] == 10
-    assert result[1]["tokens_out"] == 20
-    assert result[2]["duration_ms"] == 300
-
-def test_normalize_events_returns_new_list():
-    events = [{"input_tokens": 1}]
-    result = normalize_events(events)
-    assert result is not events
-
-def test_normalize_events_does_not_mutate_originals():
-    events = [{"input_tokens": 1}]
-    normalize_events(events)
-    assert events[0] == {"input_tokens": 1}
-
-# ---------------------------------------------------------------------------
-# normalize_file
-# ---------------------------------------------------------------------------
-
-def test_normalize_file_basic():
-    events = [{"input_tokens": 5}, {"latency_ms": 100}]
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-        for e in events:
-            f.write(json.dumps(e) + "\n")
-        path = f.name
-    result = normalize_file(path)
-    assert result[0]["tokens_in"] == 5
-    assert result[1]["duration_ms"] == 100
-
-def test_normalize_file_with_dest():
-    events = [{"input_tokens": 7}]
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-        f.write(json.dumps(events[0]) + "\n")
-        src = f.name
-    with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
-        dst = f.name
-    normalize_file(src, dst)
-    written = [json.loads(line) for line in Path(dst).read_text().splitlines() if line.strip()]
-    assert written[0]["tokens_in"] == 7
-
-def test_normalize_file_skips_blank_lines():
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-        f.write(json.dumps({"input_tokens": 1}) + "\n")
-        f.write("\n")
-        f.write(json.dumps({"latency_ms": 200}) + "\n")
-        path = f.name
-    result = normalize_file(path)
-    assert len(result) == 2
-
-def test_normalize_file_returns_list():
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-        f.write(json.dumps({"ts": 100}) + "\n")
-        path = f.name
-    result = normalize_file(path)
-    assert isinstance(result, list)
-    assert result[0]["timestamp"] == 100
-
-# ---------------------------------------------------------------------------
-# FieldMap
-# ---------------------------------------------------------------------------
-
-def test_fieldmap_defaults():
-    fm = FieldMap()
-    assert len(fm) == 10  # 10 canonical names
-
-def test_fieldmap_no_defaults():
-    fm = FieldMap(include_defaults=False)
-    assert len(fm) == 0
-
-def test_fieldmap_custom_mapping():
-    fm = FieldMap({"my_field": ["variant_a", "variant_b"]}, include_defaults=False)
-    event = {"variant_a": "hello"}
-    result = normalize_event(event, fm)
-    assert result["my_field"] == "hello"
-
-def test_fieldmap_overrides_default():
-    fm = FieldMap({"tokens_in": ["my_custom_variant"]})
-    event = {"my_custom_variant": 99}
-    result = normalize_event(event, fm)
-    assert result["tokens_in"] == 99
-
-def test_fieldmap_add():
-    fm = FieldMap(include_defaults=False)
-    fm.add("score", ["rating", "value"])
-    event = {"rating": 0.95}
-    result = normalize_event(event, fm)
-    assert result["score"] == 0.95
-
-def test_fieldmap_get():
-    fm = FieldMap(include_defaults=False)
-    fm.add("x", ["a", "b"])
-    assert fm.get("x") == ["a", "b"]
-    assert fm.get("unknown") == []
-
-def test_fieldmap_len():
-    fm = FieldMap(include_defaults=False)
-    fm.add("a", ["x"])
-    fm.add("b", ["y"])
-    assert len(fm) == 2
-
-# ---------------------------------------------------------------------------
-# NormalizeResult
-# ---------------------------------------------------------------------------
-
-def test_normalize_result_rename_count():
-    nr = NormalizeResult(event={"tokens_in": 5}, renamed={"input_tokens": "tokens_in"})
-    assert nr.rename_count == 1
-
-def test_normalize_result_zero_renames():
-    nr = NormalizeResult(event={}, renamed={})
-    assert nr.rename_count == 0
-
-# ---------------------------------------------------------------------------
-# variant priority — first variant in list wins
-# ---------------------------------------------------------------------------
-
-def test_first_variant_in_list_wins():
-    # "step" is listed before "tool" for "name"
-    event = {"step": "call_llm", "tool": "search"}
-    result = normalize_event(event)
-    assert result["name"] == "call_llm"
-
-def test_alternative_timestamp_variants():
-    for variant in ("ts", "time", "created_at", "event_time"):
-        event = {variant: 12345}
+    def test_renames_multiple_fields(self):
+        event = {
+            "input_tokens": 100,
+            "completion_tokens": 50,
+            "latency_ms": 400,
+            "model_id": "claude-sonnet-4-5",
+        }
         result = normalize_event(event)
-        assert result["timestamp"] == 12345, f"Failed for variant: {variant}"
+        self.assertEqual(result["tokens_in"], 100)
+        self.assertEqual(result["tokens_out"], 50)
+        self.assertEqual(result["duration_ms"], 400)
+        self.assertEqual(result["model"], "claude-sonnet-4-5")
+
+
+class TestCanonicalWins(unittest.TestCase):
+    def test_canonical_wins(self):
+        result = normalize_event({"tokens_in": 99, "input_tokens": 42})
+        self.assertEqual(result["tokens_in"], 99)
+        self.assertIn("input_tokens", result)  # not consumed
+
+    def test_canonical_already_present_skips_all_variants(self):
+        event = {"kind": "existing", "event_type": "other", "type": "third"}
+        self.assertEqual(normalize_event(event)["kind"], "existing")
+
+
+class TestUnknownFieldsPreserved(unittest.TestCase):
+    def test_unknown_fields_preserved(self):
+        result = normalize_event({"foo": "bar", "baz": 123})
+        self.assertEqual(result["foo"], "bar")
+        self.assertEqual(result["baz"], 123)
+
+    def test_no_variants_present(self):
+        self.assertEqual(normalize_event({"some_unrelated": "value"}), {"some_unrelated": "value"})
+
+    def test_empty_event(self):
+        self.assertEqual(normalize_event({}), {})
+
+
+class TestKeepOriginal(unittest.TestCase):
+    def test_keep_original_preserves_old_key(self):
+        result = normalize_event({"input_tokens": 42}, keep_original=True)
+        self.assertEqual(result["tokens_in"], 42)
+        self.assertEqual(result["input_tokens"], 42)
+
+    def test_keep_original_false_removes_old_key(self):
+        result = normalize_event({"input_tokens": 42}, keep_original=False)
+        self.assertNotIn("input_tokens", result)
+
+    def test_keep_original_with_multiple_fields(self):
+        result = normalize_event({"ts": 1, "model_id": "x"}, keep_original=True)
+        self.assertEqual(result["timestamp"], 1)
+        self.assertEqual(result["ts"], 1)
+        self.assertEqual(result["model"], "x")
+        self.assertEqual(result["model_id"], "x")
+
+
+class TestVariantSelection(unittest.TestCase):
+    def test_only_first_variant_renamed(self):
+        # Both prompt_tokens and input_tokens are variants of tokens_in.
+        result = normalize_event({"prompt_tokens": 5, "input_tokens": 10})
+        self.assertIn("tokens_in", result)
+        self.assertIn(result["tokens_in"], (5, 10))
+
+    def test_first_variant_in_list_wins(self):
+        # "step" is listed before "tool" for "name".
+        result = normalize_event({"step": "call_llm", "tool": "search"})
+        self.assertEqual(result["name"], "call_llm")
+
+    def test_alternative_timestamp_variants(self):
+        for variant in ("ts", "time", "created_at", "event_time"):
+            with self.subTest(variant=variant):
+                self.assertEqual(normalize_event({variant: 12345})["timestamp"], 12345)
+
+
+class TestNoMutation(unittest.TestCase):
+    def test_does_not_mutate_original(self):
+        event = {"input_tokens": 42, "foo": "bar"}
+        original = dict(event)
+        normalize_event(event)
+        self.assertEqual(event, original)
+
+
+class TestNormalizeEvents(unittest.TestCase):
+    def test_normalize_events_empty(self):
+        self.assertEqual(normalize_events([]), [])
+
+    def test_normalize_events_single(self):
+        self.assertEqual(normalize_events([{"input_tokens": 5}]), [{"tokens_in": 5}])
+
+    def test_normalize_events_multiple(self):
+        events = [{"input_tokens": 10}, {"completion_tokens": 20}, {"latency_ms": 300}]
+        result = normalize_events(events)
+        self.assertEqual(result[0]["tokens_in"], 10)
+        self.assertEqual(result[1]["tokens_out"], 20)
+        self.assertEqual(result[2]["duration_ms"], 300)
+
+    def test_normalize_events_returns_new_list(self):
+        events = [{"input_tokens": 1}]
+        self.assertIsNot(normalize_events(events), events)
+
+    def test_normalize_events_does_not_mutate_originals(self):
+        events = [{"input_tokens": 1}]
+        normalize_events(events)
+        self.assertEqual(events[0], {"input_tokens": 1})
+
+
+class TestNormalizeFile(unittest.TestCase):
+    def _write_jsonl(self, lines: list[str]) -> str:
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
+        self.addCleanup(lambda: os.path.exists(f.name) and os.unlink(f.name))
+        f.write("\n".join(lines) + "\n")
+        f.close()
+        return f.name
+
+    def test_normalize_file_basic(self):
+        path = self._write_jsonl([json.dumps({"input_tokens": 5}), json.dumps({"latency_ms": 100})])
+        result = normalize_file(path)
+        self.assertEqual(result[0]["tokens_in"], 5)
+        self.assertEqual(result[1]["duration_ms"], 100)
+
+    def test_normalize_file_with_dest(self):
+        src = self._write_jsonl([json.dumps({"input_tokens": 7})])
+        dst_fd, dst = tempfile.mkstemp(suffix=".jsonl")
+        os.close(dst_fd)
+        self.addCleanup(lambda: os.path.exists(dst) and os.unlink(dst))
+        normalize_file(src, dst)
+        written = [json.loads(ln) for ln in Path(dst).read_text().splitlines() if ln.strip()]
+        self.assertEqual(written[0]["tokens_in"], 7)
+
+    def test_normalize_file_skips_blank_lines(self):
+        path = self._write_jsonl([json.dumps({"input_tokens": 1}), "", json.dumps({"latency_ms": 200})])
+        self.assertEqual(len(normalize_file(path)), 2)
+
+    def test_normalize_file_returns_list(self):
+        path = self._write_jsonl([json.dumps({"ts": 100})])
+        result = normalize_file(path)
+        self.assertIsInstance(result, list)
+        self.assertEqual(result[0]["timestamp"], 100)
+
+    def test_normalize_file_missing_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            normalize_file("/tmp/trace-field-normalize-does-not-exist.jsonl")
+
+    def test_normalize_file_non_object_line_raises_valueerror(self):
+        path = self._write_jsonl([json.dumps({"ts": 1}), "[1, 2, 3]"])
+        with self.assertRaises(ValueError) as ctx:
+            normalize_file(path)
+        self.assertIn("line 2", str(ctx.exception))
+
+    def test_normalize_file_invalid_json_raises_valueerror(self):
+        path = self._write_jsonl([json.dumps({"ts": 1}), "{not valid json"])
+        with self.assertRaises(ValueError) as ctx:
+            normalize_file(path)
+        self.assertIn("line 2", str(ctx.exception))
+
+
+class TestFieldMap(unittest.TestCase):
+    def test_fieldmap_defaults(self):
+        self.assertEqual(len(FieldMap()), 10)
+
+    def test_fieldmap_no_defaults(self):
+        self.assertEqual(len(FieldMap(include_defaults=False)), 0)
+
+    def test_fieldmap_custom_mapping(self):
+        fm = FieldMap({"my_field": ["variant_a", "variant_b"]}, include_defaults=False)
+        self.assertEqual(normalize_event({"variant_a": "hello"}, fm)["my_field"], "hello")
+
+    def test_fieldmap_overrides_default(self):
+        fm = FieldMap({"tokens_in": ["my_custom_variant"]})
+        self.assertEqual(normalize_event({"my_custom_variant": 99}, fm)["tokens_in"], 99)
+
+    def test_fieldmap_add(self):
+        fm = FieldMap(include_defaults=False)
+        fm.add("score", ["rating", "value"])
+        self.assertEqual(normalize_event({"rating": 0.95}, fm)["score"], 0.95)
+
+    def test_fieldmap_add_returns_self(self):
+        fm = FieldMap(include_defaults=False)
+        self.assertIs(fm.add("x", ["a"]), fm)
+
+    def test_fieldmap_get(self):
+        fm = FieldMap(include_defaults=False)
+        fm.add("x", ["a", "b"])
+        self.assertEqual(fm.get("x"), ["a", "b"])
+        self.assertEqual(fm.get("unknown"), [])
+
+    def test_fieldmap_len(self):
+        fm = FieldMap(include_defaults=False)
+        fm.add("a", ["x"])
+        fm.add("b", ["y"])
+        self.assertEqual(len(fm), 2)
+
+
+class TestNormalizeResult(unittest.TestCase):
+    def test_normalize_result_rename_count(self):
+        nr = NormalizeResult(event={"tokens_in": 5}, renamed={"input_tokens": "tokens_in"})
+        self.assertEqual(nr.rename_count, 1)
+
+    def test_normalize_result_zero_renames(self):
+        self.assertEqual(NormalizeResult(event={}, renamed={}).rename_count, 0)
+
+
+class TestNormalizeEventVerbose(unittest.TestCase):
+    def test_returns_normalize_result(self):
+        self.assertIsInstance(normalize_event_verbose({"ts": 1}), NormalizeResult)
+
+    def test_reports_renamed_map(self):
+        result = normalize_event_verbose({"input_tokens": 42, "model_id": "x"})
+        self.assertEqual(result.event["tokens_in"], 42)
+        self.assertEqual(result.event["model"], "x")
+        self.assertEqual(result.renamed, {"input_tokens": "tokens_in", "model_id": "model"})
+        self.assertEqual(result.rename_count, 2)
+
+    def test_no_renames_empty_map(self):
+        result = normalize_event_verbose({"already": "canonical"})
+        self.assertEqual(result.renamed, {})
+        self.assertEqual(result.rename_count, 0)
+
+    def test_canonical_wins_not_reported_as_rename(self):
+        result = normalize_event_verbose({"tokens_in": 99, "input_tokens": 42})
+        self.assertEqual(result.renamed, {})
+        self.assertEqual(result.event["tokens_in"], 99)
+
+    def test_does_not_mutate_original(self):
+        event = {"input_tokens": 42}
+        original = dict(event)
+        normalize_event_verbose(event)
+        self.assertEqual(event, original)
+
+    def test_keep_original_still_reported(self):
+        result = normalize_event_verbose({"ts": 5}, keep_original=True)
+        self.assertEqual(result.event["timestamp"], 5)
+        self.assertEqual(result.event["ts"], 5)
+        self.assertEqual(result.renamed, {"ts": "timestamp"})
+
+
+class TestPackageMetadata(unittest.TestCase):
+    def test_version_is_string(self):
+        self.assertIsInstance(trace_field_normalize.__version__, str)
+
+    def test_version_matches_expected(self):
+        self.assertEqual(trace_field_normalize.__version__, "0.1.0")
+
+
+if __name__ == "__main__":
+    unittest.main()
